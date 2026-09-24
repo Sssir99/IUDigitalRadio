@@ -4,16 +4,24 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -22,6 +30,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -42,12 +52,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +66,28 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.iudigital.radio.ui.theme.IUDigitalRadioTheme
+import java.io.ByteArrayOutputStream
+
+/**
+ * Saver personalizado para guardar un Bitmap dentro de rememberSaveable.
+ * Convierte el Bitmap a un arreglo de bytes (PNG) para poder
+ * serializarlo y restaurarlo tras una rotación de pantalla.
+ */
+val BitmapSaver = Saver<Bitmap?, ByteArray>(
+    save = { bitmap ->
+        if (bitmap == null) {
+            // Sin foto: guardamos un arreglo vacío como marca de "nulo".
+            ByteArray(0)
+        } else {
+            val stream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            stream.toByteArray()
+        }
+    },
+    restore = { bytes ->
+        if (bytes.isEmpty()) null else BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }
+)
 
 /**
  * Actividad principal. Solo monta el tema y la pantalla de radio.
@@ -90,10 +123,9 @@ fun RadioApp() {
     var isMuted by rememberSaveable { mutableStateOf(false) }
     var selectedStationId by rememberSaveable { mutableStateOf(listaEmisoras.first().id) }
 
-    // La foto se guarda con remember simple: un Bitmap no se puede
-    // serializar con rememberSaveable, así que se pierde al rotar.
-    // Es una simplificación aceptable para esta app.
-    var foto by remember { mutableStateOf<Bitmap?>(null) }
+    // La foto usa rememberSaveable con un Saver personalizado que la
+    // convierte a bytes (PNG), de modo que también sobrevive a las rotaciones.
+    var foto by rememberSaveable(stateSaver = BitmapSaver) { mutableStateOf<Bitmap?>(null) }
 
     // Emisora actualmente seleccionada (se deriva del id guardado).
     val selectedStation = listaEmisoras.first { it.id == selectedStationId }
@@ -192,6 +224,12 @@ fun RadioApp() {
                     selectedStationId = station.id
                     isPlaying = true
                     vibrar()
+                    // Confirmación visual del cambio de emisora.
+                    Toast.makeText(
+                        context,
+                        "Reproduciendo: ${station.nombre}",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             )
         }
@@ -277,6 +315,11 @@ fun SeccionReproductor(
             Text(station.frecuencia, fontSize = 16.sp, color = station.color)
             Spacer(Modifier.height(16.dp))
 
+            // Barras de ecualizador animadas cuando está reproduciendo.
+            Ecualizador(activo = isPlaying, color = station.color)
+
+            Spacer(Modifier.height(16.dp))
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // Botón Play / Pause (alterna)
                 FilledIconButton(
@@ -292,6 +335,54 @@ fun SeccionReproductor(
                 IconButton(onClick = onToggleMute) {
                     Text(if (isMuted) "🔇" else "🔊", fontSize = 22.sp)
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Barras de ecualizador animadas. Cuando la emisora está sonando,
+ * las barras suben y bajan continuamente; en pausa quedan estáticas.
+ */
+@Composable
+fun Ecualizador(activo: Boolean, color: Color) {
+    Row(
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.height(24.dp)
+    ) {
+        if (activo) {
+            val transition = rememberInfiniteTransition(label = "ecualizador")
+            // Cada barra usa una duración distinta para verse desincronizadas.
+            val duraciones = listOf(320, 420, 260, 380)
+            duraciones.forEach { duracion ->
+                val altura by transition.animateFloat(
+                    initialValue = 0.25f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(duracion, easing = LinearEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "barra"
+                )
+                Box(
+                    modifier = Modifier
+                        .width(6.dp)
+                        .fillMaxHeight(altura)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(color)
+                )
+            }
+        } else {
+            // En pausa, barras bajas y atenuadas.
+            repeat(4) {
+                Box(
+                    modifier = Modifier
+                        .width(6.dp)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(color.copy(alpha = 0.3f))
+                )
             }
         }
     }
